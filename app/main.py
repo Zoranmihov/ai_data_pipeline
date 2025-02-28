@@ -1,9 +1,20 @@
 import os
 import json
 import re
+import gradio as gr
 from pypdf import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter  # kept for compatibility
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaLLM
+
+# Hardcoded directories
+KNOWLEDGE_DIR = "data/knowledge"
+PROCESSED_DIR = "data/processed"
+
+# Ensure directories exist
+os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
+os.makedirs(PROCESSED_DIR, exist_ok=True)
+
+# --- Existing functions ---
 
 def extract_pages_from_pdf(file_path):
     """Extract text from each page of the PDF file and return as a list."""
@@ -26,12 +37,11 @@ def is_valid_json(data):
 def generate_qa_pair(chunk_text, llm, prompt_template):
     """
     Uses the given LLM to generate a JSON-formatted question-answer pair
-    from the provided text chunk. Returns a tuple (qa_pair, raw_response)
-    where qa_pair is the parsed JSON (or None if invalid) and raw_response
-    is the full text response from the model.
+    from the provided text chunk.
+    Returns a tuple (qa_pair, raw_response).
     """
     prompt = prompt_template.format(chunk=chunk_text.strip())
-    raw_response = llm.invoke(prompt)  # Use invoke() to avoid deprecation warning.
+    raw_response = llm.invoke(prompt)
     
     # 1. Try if the raw response is directly valid JSON.
     if is_valid_json(raw_response):
@@ -50,23 +60,64 @@ def generate_qa_pair(chunk_text, llm, prompt_template):
     print("Warning: Received invalid JSON for a chunk, skipping.")
     return None, raw_response
 
-def main():
-    # --- Step 1: Find all PDF files in the data directory ---
-    data_dir = "data"
-    pdf_files = [
-        os.path.join(data_dir, filename)
-        for filename in os.listdir(data_dir)
-        if filename.lower().endswith(".pdf")
-    ]
-    
-    if not pdf_files:
-        print("No PDF files found in the data directory.")
-        return
-    
-    print(f"Found {len(pdf_files)} PDF file(s) in '{data_dir}'.")
+# --- PDF Processing Function ---
 
-    # --- Step 2: Initialize the LLM ---
-    print("Initializing LLM...")
+def process_pdf(pdf_path, output_dir, llm, prompt_template):
+    """
+    Process a single PDF file:
+      - Extract pages, group them with a sliding window, split into sub-chunks,
+        and use the LLM to generate Q/A pairs.
+      - Append each valid response directly to a JSONL file named after the PDF.
+    """
+    pages = extract_pages_from_pdf(pdf_path)
+    num_pages = len(pages)
+    
+    # Group pages using a sliding window centered on odd-numbered pages.
+    window_chunks = []
+    for i in range(num_pages):
+        if (i + 1) % 2 == 1:
+            start = max(0, i - 2)
+            end = min(num_pages, i + 3)
+            window_text = "\n\n".join(pages[start:end])
+            window_chunks.append(window_text)
+    
+    sub_chunk_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1500,
+        chunk_overlap=200,
+        length_function=len
+    )
+    
+    # Prepare output file path.
+    pdf_filename = os.path.basename(pdf_path)
+    output_filename = os.path.splitext(pdf_filename)[0] + ".jsonl"
+    output_filepath = os.path.join(output_dir, output_filename)
+    
+    valid_responses_count = 0
+    invalid_responses_count = 0
+    
+    # Open the output file once in append mode.
+    with open(output_filepath, "a") as f:
+        for window_index, window in enumerate(window_chunks, start=1):
+            sub_chunks = sub_chunk_splitter.split_text(window)
+            print(f"Window {window_index} split into {len(sub_chunks)} sub-chunks.")
+            for sub_index, sub_chunk in enumerate(sub_chunks, start=1):
+                print(f"Processing sub-chunk {sub_index}/{len(sub_chunks)} from window {window_index} of {pdf_path}...")
+                qa_pair, raw_response = generate_qa_pair(sub_chunk, llm, prompt_template)
+                if qa_pair is not None:
+                    qa_pair["source_file"] = pdf_path
+                    qa_pair["window_index"] = window_index
+                    qa_pair["subchunk_index"] = sub_index
+                    f.write(json.dumps(qa_pair) + "\n")
+                    f.flush()  
+                    valid_responses_count += 1
+                else:
+                    invalid_responses_count += 1
+    
+    return (f"Processed '{pdf_filename}'. Valid responses: {valid_responses_count}, "
+            f"Invalid responses: {invalid_responses_count}. Appended to '{output_filepath}'.")
+
+def process_all_pdfs():
+
     llm = OllamaLLM(
         model="deepseek-r1:7b",
         temperature=0.3,
@@ -74,7 +125,6 @@ def main():
         base_url="http://ollama:11434"
     )
     
-    # Define a prompt template for generating a JSON Q/A pair in a scholarly tone.
     prompt_template = (
         "You are a science researcher. "
         "When given a body of text, focus on extracting and discussing the technical details and coding concepts. "
@@ -85,80 +135,89 @@ def main():
         "{chunk}\n\n"
         "Only respond with the JSON and no additional text."
     )
-
     
-    # --- Step 3: Prepare output files ---
-    valid_output_filename = "responses.jsonl"
-    invalid_output_filename = "invalid_responses.jsonl"
-    sample_invalid_filename = "sample_invalid_response.json"
-    sample_valid_saved = False
-    sample_invalid_saved = False
+    pdf_files = [os.path.join(KNOWLEDGE_DIR, f) for f in os.listdir(KNOWLEDGE_DIR) if f.lower().endswith(".pdf")]
+    messages = []
+    for pdf_path in pdf_files:
+        result = process_pdf(pdf_path, PROCESSED_DIR, llm, prompt_template)
+        messages.append(result)
+    
+    return "\n".join(messages)
 
-    print("Processing PDF files and appending responses to files...")
+# --- Gradio Interface Functions ---
 
-    # We'll also instantiate a text splitter for the sub-chunking.
-    # Adjust chunk_size and overlap as needed.
-    sub_chunk_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,
-        chunk_overlap=200,
-        length_function=len
-    )
+def list_pdfs_fixed():
+    if not os.path.exists(KNOWLEDGE_DIR):
+        return []
+    return [f for f in os.listdir(KNOWLEDGE_DIR) if f.lower().endswith(".pdf")]
 
-    with open(valid_output_filename, "a") as valid_outfile, open(invalid_output_filename, "a") as invalid_outfile:
-        for pdf_file in pdf_files:
-            print(f"\nProcessing {pdf_file}...")
-            pages = extract_pages_from_pdf(pdf_file)
-            num_pages = len(pages)
-            print(f"Extracted {num_pages} pages from {pdf_file}.")
+def upload_pdf_fixed(file):
+    if file is None:
+        return "No file uploaded.", list_pdfs_fixed()
+    os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
+    
+    if hasattr(file, "read"):
+        data = file.read()
+        filename = os.path.basename(file.name)
+    else:
+        with open(file, "rb") as f:
+            data = f.read()
+        filename = os.path.basename(file)
+    
+    destination = os.path.join(KNOWLEDGE_DIR, filename)
+    with open(destination, "wb") as f:
+        f.write(data)
+    
+    return f"Uploaded '{filename}' to '{KNOWLEDGE_DIR}'.", list_pdfs_fixed()
 
-            # --- Step 4: Group pages using a sliding window of 5 pages ---
-            # We use odd-numbered pages as the window center.
-            window_chunks = []
-            for i in range(num_pages):
-                if (i + 1) % 2 == 1:  # center on odd-numbered pages
-                    start = max(0, i - 2)
-                    end = min(num_pages, i + 3)  # covers pages i-2 to i+2
-                    window_text = "\n\n".join(pages[start:end])
-                    window_chunks.append(window_text)
-            print(f"Created {len(window_chunks)} page-window chunks from {pdf_file}.")
+def delete_pdf_fixed(pdf_filename):
+    if isinstance(pdf_filename, list):
+        pdf_filename = pdf_filename[0] if pdf_filename else ""
+    file_path = os.path.join(KNOWLEDGE_DIR, pdf_filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        status = f"Deleted '{pdf_filename}'."
+    else:
+        status = f"'{pdf_filename}' does not exist."
+    return status, list_pdfs_fixed()
 
-            # --- Step 5: For each window, further split into sub-chunks for QNA generation ---
-            for window_index, window in enumerate(window_chunks, start=1):
-                # Split the window text into smaller sub-chunks.
-                sub_chunks = sub_chunk_splitter.split_text(window)
-                print(f"Window {window_index} split into {len(sub_chunks)} sub-chunks.")
-                for sub_index, sub_chunk in enumerate(sub_chunks, start=1):
-                    print(f"Processing sub-chunk {sub_index}/{len(sub_chunks)} from window {window_index} of {pdf_file}...")
-                    qa_pair, raw_response = generate_qa_pair(sub_chunk, llm, prompt_template)
-                    if qa_pair is not None:
-                        # Record source and indices for reference.
-                        qa_pair["source_file"] = pdf_file
-                        qa_pair["window_index"] = window_index
-                        qa_pair["subchunk_index"] = sub_index
-                        valid_outfile.write(json.dumps(qa_pair) + "\n")
-                        valid_outfile.flush()
-                    else:
-                        # Log invalid response details for analysis.
-                        log_entry = {
-                            "source_file": pdf_file,
-                            "window_index": window_index,
-                            "subchunk_index": sub_index,
-                            "raw_response": raw_response,
-                            # Optionally include a snippet of the sub-chunk text (first 500 characters)
-                            "subchunk_text_snippet": sub_chunk[:500]
-                        }
-                        invalid_outfile.write(json.dumps(log_entry) + "\n")
-                        invalid_outfile.flush()
+# Gradio Interface
 
-                        if not sample_invalid_saved:
-                            with open(sample_invalid_filename, "w") as sample_invalid_file:
-                                sample_invalid_file.write(json.dumps(log_entry, indent=4))
-                            sample_invalid_saved = True
-
-    print(f"\nAll responses have been appended to {valid_output_filename}.")
-    print(f"All invalid responses have been appended to {invalid_output_filename}.")
-    if sample_invalid_saved:
-        print(f"A sample invalid response has been saved to {sample_invalid_filename}.")
+def main_interface():
+    with gr.Blocks() as demo:
+        gr.Markdown("# PDF Management and Processing Interface")
+        
+        with gr.Tab("Upload PDF"):
+            with gr.Row():
+                upload_input = gr.File(label="Upload PDF", file_types=[".pdf"], file_count="single")
+            upload_btn = gr.Button("Upload PDF")
+            upload_status = gr.Textbox(label="Upload Status")
+            upload_btn.click(fn=upload_pdf_fixed, inputs=upload_input, outputs=[upload_status])
+        
+        with gr.Tab("Delete PDF"):
+            with gr.Row():
+                refresh_btn_del = gr.Button("Refresh PDF List")
+            current_files = list_pdfs_fixed()
+            default_value = current_files[0] if current_files else None
+            pdf_list_del = gr.Dropdown(choices=current_files, value=default_value, label="Select PDF to Delete")
+            delete_status = gr.Textbox(label="Deletion Status")
+            delete_btn = gr.Button("Delete Selected PDF")
+            refresh_btn_del.click(fn=list_pdfs_fixed, inputs=[], outputs=pdf_list_del)
+            delete_btn.click(fn=delete_pdf_fixed, inputs=pdf_list_del, outputs=[delete_status, pdf_list_del])
+        
+        with gr.Tab("Process PDFs"):
+            gr.Markdown("Review the PDFs in your knowledge directory before processing. Click Refresh to see the updated list.")
+            with gr.Row():
+                refresh_btn_proc = gr.Button("Refresh PDF List")
+            pdf_list_proc = gr.Textbox(label="PDFs Ready for Processing", interactive=False, lines=5)
+            refresh_btn_proc.click(fn=lambda: "\n".join(list_pdfs_fixed()),
+                                     inputs=[], outputs=pdf_list_proc)
+            process_btn = gr.Button("Process All PDFs")
+            process_output = gr.Textbox(label="Processing Output", lines=10)
+            process_btn.click(fn=process_all_pdfs, inputs=[], outputs=process_output)
+    
+    return demo
 
 if __name__ == "__main__":
-    main()
+    demo = main_interface()
+    demo.launch(server_name="0.0.0.0", server_port=7860)
