@@ -1,1 +1,1 @@
-A simple setup using deepseek-r1:7b to try and covert pdf files to a QNA json data that could be used for model training. Extended by all-MiniLM-L6-v2 using embedings, to provide answers based on the generated data
+A data pipeline that processes PDF files to generate Q&A-style JSON data using DeepSeek-R1:7B (compatible with most Ollama models). This pipeline is complemented by a retrieval-based system that efficiently searches the generated data to provide accurate answers to user queries.
