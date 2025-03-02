@@ -52,7 +52,7 @@ iface = gr.Interface(
     fn=retrieve_answer,
     inputs=gr.Textbox(label="Ask a question"),
     outputs=gr.Textbox(label="Answer"),
-    title="Product Q&A Chatbot",
+    title="Q&A Chatbot",
     description="Enter a product-related question and get a precise answer from the dataset."
 )
 

@@ -16,3 +16,11 @@ services:
       - "7860:7860"
     volumes:
       - ./app:/app
+
+  rag_chatbot:
+    build: ./rag_chatbot
+    container_name: rag_chatbot
+    ports:
+      - "7861:7861"
+    volumes:
+      - ./rag_chatbot:/rag_chatbot

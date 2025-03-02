@@ -1,1 +1,1 @@
-A simple setup using deepseek-r1:7b to try and covert pdf files to a QNA json data that could be used for model training.
+A simple setup using deepseek-r1:7b to try and covert pdf files to a QNA json data that could be used for model training. Extended by all-MiniLM-L6-v2 using embedings, to provide answers based on the generated data
